@@ -3,62 +3,21 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-
-const HISTORY_KEY = "gitreverse_history";
-
-type HistoryEntry = {
-  owner: string;
-  repo: string;
-  visitedAt: string;
-  /** `quick`, `deep`, or `m:${focus}`; omitted in older localStorage rows (= quick). */
-  historySlot?: string;
-  promptPreview?: string;
-  lastGenerationType?: "quick" | "deep" | "manual";
-  lastManualFocus?: string;
-};
-
-function historySlotOf(e: { historySlot?: string }): string {
-  return e.historySlot ?? "quick";
-}
+import { Navbar } from "@/components/navbar";
+import { useAuth } from "@/contexts/AuthContext";
+import {
+  type HistoryEntry,
+  fetchUserHistory,
+  historySlotOf,
+  migrateLocalHistoryToServer,
+  readLocalHistory,
+  sortHistoryEntries,
+} from "@/lib/user-history";
 
 function historyHref(entry: HistoryEntry): string {
   const o = encodeURIComponent(entry.owner);
   const r = encodeURIComponent(entry.repo);
-  const slot = historySlotOf(entry);
-  if (slot === "deep") return `/${o}/${r}/deep`;
-  if (slot.startsWith("m:")) {
-    const focus = entry.lastManualFocus?.trim() || slot.slice(2);
-    if (!focus) return `/${o}/${r}`;
-    return `/${o}/${r}/${encodeURIComponent(focus)}`;
-  }
   return `/${o}/${r}`;
-}
-
-function isHistoryEntry(x: unknown): x is HistoryEntry {
-  if (
-    typeof x !== "object" ||
-    x === null ||
-    typeof (x as HistoryEntry).owner !== "string" ||
-    typeof (x as HistoryEntry).repo !== "string" ||
-    typeof (x as HistoryEntry).visitedAt !== "string"
-  ) {
-    return false;
-  }
-  const pv = (x as HistoryEntry).promptPreview;
-  if (pv !== undefined && typeof pv !== "string") return false;
-  const gt = (x as HistoryEntry).lastGenerationType;
-  if (
-    gt !== undefined &&
-    gt !== "quick" &&
-    gt !== "deep" &&
-    gt !== "manual"
-  ) {
-    return false;
-  }
-  const mf = (x as HistoryEntry).lastManualFocus;
-  if (mf !== undefined && typeof mf !== "string") return false;
-  const hs = (x as HistoryEntry).historySlot;
-  return hs === undefined || typeof hs === "string";
 }
 
 function relativeTime(iso: string): string {
@@ -76,70 +35,45 @@ function relativeTime(iso: string): string {
 }
 
 export function HistoryPage() {
+  const { isAuthenticated, session } = useAuth();
   const [entries, setEntries] = useState<HistoryEntry[] | null>(null);
 
   useEffect(() => {
-    const raw = localStorage.getItem(HISTORY_KEY);
-    if (!raw) {
-      setEntries([]);
-      return;
-    }
-    try {
-      const parsed = JSON.parse(raw) as unknown;
-      if (!Array.isArray(parsed)) {
-        setEntries([]);
+    let cancelled = false;
+
+    async function load() {
+      const token = session?.access_token;
+      if (isAuthenticated && token) {
+        await migrateLocalHistoryToServer(token).catch(() => {});
+        const remote = await fetchUserHistory(token);
+        if (!cancelled) {
+          setEntries(sortHistoryEntries(remote));
+        }
         return;
       }
-      const list = parsed.filter(isHistoryEntry);
-      const withPrompt = list.filter((e) => e.promptPreview?.trim());
-      const sorted = [...withPrompt].sort(
-        (a, b) =>
-          new Date(b.visitedAt).getTime() - new Date(a.visitedAt).getTime()
-      );
-      setEntries(sorted);
-    } catch {
-      setEntries([]);
+
+      const local = readLocalHistory();
+      if (!cancelled) {
+        setEntries(sortHistoryEntries(local));
+      }
     }
-  }, []);
+
+    void load();
+    return () => {
+      cancelled = true;
+    };
+  }, [isAuthenticated, session?.access_token]);
 
   return (
     <div className="flex min-h-screen flex-col bg-[#FFFDF8] text-zinc-900">
-      <nav className="sticky top-0 z-50 border-b-[3px] border-zinc-900 bg-[#FFFDF8]">
-        <div className="mx-auto flex h-16 max-w-4xl items-center justify-between px-4 sm:px-6">
-          <Link
-            href="/"
-            className="text-xl font-bold tracking-tight transition-opacity hover:opacity-80"
-          >
-            <span className="text-zinc-900">Git</span>
-            <span className="text-[#d31611]">Reverse</span>
-          </Link>
-          <div className="flex items-center gap-4">
-            <Link
-              href="/library"
-              className="font-semibold text-zinc-900 transition-transform hover:-translate-y-0.5"
-            >
-              Library
-            </Link>
-            <a
-              href="https://github.com/filiksyos/gitreverse"
-              target="_blank"
-              rel="noopener noreferrer"
-              className="font-semibold text-zinc-900 transition-transform hover:-translate-y-0.5"
-            >
-              GitHub
-            </a>
-          </div>
-        </div>
-      </nav>
+      <Navbar />
 
       <main className="mx-auto flex w-full max-w-2xl flex-1 flex-col gap-8 px-4 py-12 sm:px-6">
         <div className="flex flex-col gap-2 text-center sm:text-left">
           <h1 className="text-4xl font-extrabold tracking-tighter sm:text-5xl">
             History
           </h1>
-          <p className="text-zinc-600">
-            Your previously generated prompts.
-          </p>
+          <p className="text-zinc-600">Your previously generated prompts.</p>
         </div>
 
         {entries === null ? (
